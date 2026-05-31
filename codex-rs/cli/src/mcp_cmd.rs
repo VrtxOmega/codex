@@ -80,6 +80,14 @@ pub struct AddArgs {
     /// Name for the MCP server configuration.
     pub name: String,
 
+    /// Default approval mode for this server's tools when no per-tool override exists.
+    #[arg(
+        long = "default-tools-approval-mode",
+        value_parser = parse_app_tool_approval,
+        value_name = "MODE"
+    )]
+    pub default_tools_approval_mode: Option<AppToolApproval>,
+
     #[command(flatten)]
     pub transport_args: AddMcpTransportArgs,
 }
@@ -281,6 +289,7 @@ async fn run_add(config_overrides: &CliConfigOverrides, add_args: AddArgs) -> Re
 
     let AddArgs {
         name,
+        default_tools_approval_mode,
         transport_args,
     } = add_args;
 
@@ -349,7 +358,7 @@ async fn run_add(config_overrides: &CliConfigOverrides, add_args: AddArgs) -> Re
         disabled_reason: None,
         startup_timeout_sec: None,
         tool_timeout_sec: None,
-        default_tools_approval_mode: None,
+        default_tools_approval_mode,
         enabled_tools: None,
         disabled_tools: None,
         scopes: None,
@@ -595,6 +604,7 @@ async fn run_list(config_overrides: &CliConfigOverrides, list_args: ListArgs) ->
                     "tool_timeout_sec": cfg
                         .tool_timeout_sec
                         .map(|timeout| timeout.as_secs_f64()),
+                    "default_tools_approval_mode": cfg.default_tools_approval_mode,
                     "auth_status": auth_status,
                 })
             })
@@ -837,6 +847,7 @@ async fn run_get(config_overrides: &CliConfigOverrides, get_args: GetArgs) -> Re
             "tool_timeout_sec": server
                 .tool_timeout_sec
                 .map(|timeout| timeout.as_secs_f64()),
+            "default_tools_approval_mode": server.default_tools_approval_mode,
         }))?;
         println!("{output}");
         return Ok(());
@@ -963,6 +974,15 @@ fn parse_env_pair(raw: &str) -> Result<(String, String), String> {
         .ok_or_else(|| "environment entries must be in KEY=VALUE form".to_string())?;
 
     Ok((key.to_string(), value))
+}
+
+fn parse_app_tool_approval(raw: &str) -> Result<AppToolApproval, String> {
+    match raw {
+        "auto" => Ok(AppToolApproval::Auto),
+        "prompt" => Ok(AppToolApproval::Prompt),
+        "approve" => Ok(AppToolApproval::Approve),
+        _ => Err("expected one of: auto, prompt, approve".to_string()),
+    }
 }
 
 fn validate_server_name(name: &str) -> Result<()> {

@@ -1,6 +1,7 @@
 use std::path::Path;
 
 use anyhow::Result;
+use codex_config::types::AppToolApproval;
 use codex_config::types::McpServerTransportConfig;
 use codex_core::config::load_global_mcp_servers;
 use predicates::str::contains;
@@ -61,6 +62,96 @@ async fn add_and_remove_server_updates_global_config() -> Result<()> {
         .assert()
         .success()
         .stdout(contains("No MCP server named 'docs' found."));
+
+    let servers = load_global_mcp_servers(codex_home.path()).await?;
+    assert!(servers.is_empty());
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn add_with_default_tools_approval_mode_persists_server_default() -> Result<()> {
+    let codex_home = TempDir::new()?;
+
+    let mut add_cmd = codex_command(codex_home.path())?;
+    add_cmd
+        .args([
+            "mcp",
+            "add",
+            "trusted",
+            "--default-tools-approval-mode",
+            "approve",
+            "--",
+            "echo",
+            "hello",
+        ])
+        .assert()
+        .success()
+        .stdout(contains("Added global MCP server 'trusted'."));
+
+    let servers = load_global_mcp_servers(codex_home.path()).await?;
+    let trusted = servers.get("trusted").expect("server should exist");
+    assert_eq!(
+        trusted.default_tools_approval_mode,
+        Some(AppToolApproval::Approve)
+    );
+
+    let mut get_cmd = codex_command(codex_home.path())?;
+    let get_output = get_cmd
+        .args(["mcp", "get", "trusted", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let get_json: serde_json::Value = serde_json::from_slice(&get_output)?;
+    assert_eq!(
+        get_json["default_tools_approval_mode"],
+        serde_json::json!("approve")
+    );
+
+    let mut list_cmd = codex_command(codex_home.path())?;
+    let list_output = list_cmd
+        .args(["mcp", "list", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let list_json: serde_json::Value = serde_json::from_slice(&list_output)?;
+    let trusted_entry = list_json
+        .as_array()
+        .expect("list output should be an array")
+        .iter()
+        .find(|entry| entry["name"] == "trusted")
+        .expect("trusted server should be listed");
+    assert_eq!(
+        trusted_entry["default_tools_approval_mode"],
+        serde_json::json!("approve")
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn add_rejects_invalid_default_tools_approval_mode() -> Result<()> {
+    let codex_home = TempDir::new()?;
+
+    let mut add_cmd = codex_command(codex_home.path())?;
+    add_cmd
+        .args([
+            "mcp",
+            "add",
+            "bad",
+            "--default-tools-approval-mode",
+            "always",
+            "--",
+            "echo",
+            "hello",
+        ])
+        .assert()
+        .failure()
+        .stderr(contains("expected one of: auto, prompt, approve"));
 
     let servers = load_global_mcp_servers(codex_home.path()).await?;
     assert!(servers.is_empty());
