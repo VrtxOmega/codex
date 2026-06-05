@@ -323,6 +323,117 @@ approval_mode = "approve"
 }
 
 #[tokio::test]
+async fn clearing_server_default_keeps_prompt_tool_override_outside_runtime_approval() -> Result<()>
+{
+    let codex_home = TempDir::new()?;
+
+    let mut add_cmd = codex_command(codex_home.path())?;
+    add_cmd
+        .args([
+            "mcp",
+            "add",
+            "docs",
+            "--default-tools-approval-mode",
+            "approve",
+            "--",
+            "docs-server",
+        ])
+        .assert()
+        .success();
+
+    std::fs::write(
+        codex_home.path().join("config.toml"),
+        r#"[mcp_servers.docs]
+command = "docs-server"
+default_tools_approval_mode = "approve"
+
+[mcp_servers.docs.tools.search]
+approval_mode = "prompt"
+"#,
+    )?;
+
+    let mut update_cmd = codex_command(codex_home.path())?;
+    update_cmd
+        .args(["mcp", "add", "docs", "--", "docs-server-v2"])
+        .assert()
+        .success();
+
+    let servers = load_global_mcp_servers(codex_home.path()).await?;
+    let docs = servers.get("docs").expect("server should exist");
+    assert_eq!(docs.default_tools_approval_mode, None);
+    assert_eq!(
+        docs.tools.get("search"),
+        Some(&McpServerToolConfig {
+            approval_mode: Some(AppToolApproval::Prompt),
+        })
+    );
+
+    let mut get_cmd = codex_command(codex_home.path())?;
+    let get_output = get_cmd
+        .args(["mcp", "get", "docs", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let get_json: serde_json::Value = serde_json::from_slice(&get_output)?;
+    assert_eq!(
+        get_json["default_tools_approval_mode"],
+        serde_json::Value::Null
+    );
+    assert_eq!(
+        get_json["server_default_tools_approval"],
+        serde_json::json!({
+            "mode": "auto",
+            "source": "inherited",
+        })
+    );
+    assert_eq!(
+        get_json["tools"]["search"],
+        serde_json::json!({
+            "approval_mode": "prompt",
+            "approval_mode_source": "explicit",
+            "effective_approval_mode": "prompt",
+        })
+    );
+    assert_json_does_not_expose_runtime_approval(&get_json);
+
+    let mut list_cmd = codex_command(codex_home.path())?;
+    let list_output = list_cmd
+        .args(["mcp", "list", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let list_json: serde_json::Value = serde_json::from_slice(&list_output)?;
+    let docs_entry = list_json
+        .as_array()
+        .expect("list output should be an array")
+        .iter()
+        .find(|entry| entry["name"] == "docs")
+        .expect("docs server should be listed");
+    assert_eq!(
+        docs_entry["server_default_tools_approval"],
+        serde_json::json!({
+            "mode": "auto",
+            "source": "inherited",
+        })
+    );
+    assert_eq!(
+        docs_entry["tools"]["search"],
+        serde_json::json!({
+            "approval_mode": "prompt",
+            "approval_mode_source": "explicit",
+            "effective_approval_mode": "prompt",
+        })
+    );
+    assert_json_does_not_expose_runtime_approval(docs_entry);
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn add_rejects_invalid_default_tools_approval_mode() -> Result<()> {
     let codex_home = TempDir::new()?;
 
@@ -346,6 +457,26 @@ async fn add_rejects_invalid_default_tools_approval_mode() -> Result<()> {
     assert!(servers.is_empty());
 
     Ok(())
+}
+
+fn assert_json_does_not_expose_runtime_approval(value: &serde_json::Value) {
+    match value {
+        serde_json::Value::Object(map) => {
+            for (key, child) in map {
+                assert!(
+                    !key.contains("runtime_approval") && !key.contains("runtime_approvals"),
+                    "JSON readback must not expose runtime approval state: {key}"
+                );
+                assert_json_does_not_expose_runtime_approval(child);
+            }
+        }
+        serde_json::Value::Array(values) => {
+            for child in values {
+                assert_json_does_not_expose_runtime_approval(child);
+            }
+        }
+        _ => {}
+    }
 }
 
 #[tokio::test]
