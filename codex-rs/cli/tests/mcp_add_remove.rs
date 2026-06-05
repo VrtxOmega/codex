@@ -2,6 +2,7 @@ use std::path::Path;
 
 use anyhow::Result;
 use codex_config::types::AppToolApproval;
+use codex_config::types::McpServerToolConfig;
 use codex_config::types::McpServerTransportConfig;
 use codex_core::config::load_global_mcp_servers;
 use predicates::str::contains;
@@ -109,6 +110,18 @@ async fn add_with_default_tools_approval_mode_persists_server_default() -> Resul
         get_json["default_tools_approval_mode"],
         serde_json::json!("approve")
     );
+    assert_eq!(
+        get_json["default_tools_approval_mode_source"],
+        serde_json::json!("explicit")
+    );
+    assert_eq!(
+        get_json["server_default_tools_approval"],
+        serde_json::json!({
+            "mode": "approve",
+            "source": "explicit",
+        })
+    );
+    assert_eq!(get_json["tools"], serde_json::json!({}));
 
     let mut list_cmd = codex_command(codex_home.path())?;
     let list_output = list_cmd
@@ -128,6 +141,182 @@ async fn add_with_default_tools_approval_mode_persists_server_default() -> Resul
     assert_eq!(
         trusted_entry["default_tools_approval_mode"],
         serde_json::json!("approve")
+    );
+    assert_eq!(
+        trusted_entry["default_tools_approval_mode_source"],
+        serde_json::json!("explicit")
+    );
+    assert_eq!(
+        trusted_entry["server_default_tools_approval"],
+        serde_json::json!({
+            "mode": "approve",
+            "source": "explicit",
+        })
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn json_readback_marks_unset_server_default_as_inherited() -> Result<()> {
+    let codex_home = TempDir::new()?;
+
+    let mut add_cmd = codex_command(codex_home.path())?;
+    add_cmd
+        .args(["mcp", "add", "docs", "--", "echo", "hello"])
+        .assert()
+        .success();
+
+    let mut get_cmd = codex_command(codex_home.path())?;
+    let output = get_cmd
+        .args(["mcp", "get", "docs", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: serde_json::Value = serde_json::from_slice(&output)?;
+
+    assert_eq!(json["default_tools_approval_mode"], serde_json::Value::Null);
+    assert_eq!(
+        json["default_tools_approval_mode_source"],
+        serde_json::json!("inherited")
+    );
+    assert_eq!(
+        json["server_default_tools_approval"],
+        serde_json::json!({
+            "mode": "auto",
+            "source": "inherited",
+        })
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn add_preserves_per_tool_overrides_when_server_default_changes() -> Result<()> {
+    let codex_home = TempDir::new()?;
+    std::fs::write(
+        codex_home.path().join("config.toml"),
+        r#"[mcp_servers.docs]
+command = "docs-server"
+default_tools_approval_mode = "prompt"
+
+[mcp_servers.docs.tools.search]
+approval_mode = "approve"
+"#,
+    )?;
+
+    let mut add_cmd = codex_command(codex_home.path())?;
+    add_cmd
+        .args([
+            "mcp",
+            "add",
+            "docs",
+            "--default-tools-approval-mode",
+            "auto",
+            "--",
+            "docs-server-v2",
+            "--stdio",
+        ])
+        .assert()
+        .success();
+
+    let servers = load_global_mcp_servers(codex_home.path()).await?;
+    let docs = servers.get("docs").expect("server should exist");
+    assert_eq!(
+        docs.default_tools_approval_mode,
+        Some(AppToolApproval::Auto)
+    );
+    assert_eq!(
+        docs.tools.get("search"),
+        Some(&McpServerToolConfig {
+            approval_mode: Some(AppToolApproval::Approve),
+        })
+    );
+
+    let mut get_cmd = codex_command(codex_home.path())?;
+    let output = get_cmd
+        .args(["mcp", "get", "docs", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: serde_json::Value = serde_json::from_slice(&output)?;
+    assert_eq!(
+        json["server_default_tools_approval"],
+        serde_json::json!({
+            "mode": "auto",
+            "source": "explicit",
+        })
+    );
+    assert_eq!(
+        json["tools"]["search"],
+        serde_json::json!({
+            "approval_mode": "approve",
+            "approval_mode_source": "explicit",
+            "effective_approval_mode": "approve",
+        })
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn add_without_default_clears_server_default_but_preserves_tool_overrides() -> Result<()> {
+    let codex_home = TempDir::new()?;
+    std::fs::write(
+        codex_home.path().join("config.toml"),
+        r#"[mcp_servers.docs]
+command = "docs-server"
+default_tools_approval_mode = "prompt"
+
+[mcp_servers.docs.tools.search]
+approval_mode = "approve"
+"#,
+    )?;
+
+    let mut add_cmd = codex_command(codex_home.path())?;
+    add_cmd
+        .args(["mcp", "add", "docs", "--", "docs-server-v2"])
+        .assert()
+        .success();
+
+    let servers = load_global_mcp_servers(codex_home.path()).await?;
+    let docs = servers.get("docs").expect("server should exist");
+    assert_eq!(docs.default_tools_approval_mode, None);
+    assert_eq!(
+        docs.tools.get("search"),
+        Some(&McpServerToolConfig {
+            approval_mode: Some(AppToolApproval::Approve),
+        })
+    );
+
+    let mut get_cmd = codex_command(codex_home.path())?;
+    let output = get_cmd
+        .args(["mcp", "get", "docs", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: serde_json::Value = serde_json::from_slice(&output)?;
+    assert_eq!(json["default_tools_approval_mode"], serde_json::Value::Null);
+    assert_eq!(
+        json["server_default_tools_approval"],
+        serde_json::json!({
+            "mode": "auto",
+            "source": "inherited",
+        })
+    );
+    assert_eq!(
+        json["tools"]["search"],
+        serde_json::json!({
+            "approval_mode": "approve",
+            "approval_mode_source": "explicit",
+            "effective_approval_mode": "approve",
+        })
     );
 
     Ok(())

@@ -349,6 +349,11 @@ async fn run_add(config_overrides: &CliConfigOverrides, add_args: AddArgs) -> Re
         AddMcpTransportArgs { .. } => bail!("exactly one of --command or --url must be provided"),
     };
 
+    let prior_tools = servers
+        .get(&name)
+        .map(|server| server.tools.clone())
+        .unwrap_or_default();
+
     let new_entry = McpServerConfig {
         transport: transport.clone(),
         environment_id: codex_config::DEFAULT_MCP_SERVER_ENVIRONMENT_ID.to_string(),
@@ -368,7 +373,7 @@ async fn run_add(config_overrides: &CliConfigOverrides, add_args: AddArgs) -> Re
                 client_id: Some(client_id),
             }),
         oauth_resource: oauth_resource.clone(),
-        tools: HashMap::new(),
+        tools: prior_tools,
     };
 
     servers.insert(name.clone(), new_entry);
@@ -605,6 +610,9 @@ async fn run_list(config_overrides: &CliConfigOverrides, list_args: ListArgs) ->
                         .tool_timeout_sec
                         .map(|timeout| timeout.as_secs_f64()),
                     "default_tools_approval_mode": cfg.default_tools_approval_mode,
+                    "default_tools_approval_mode_source": server_default_tools_approval_source(cfg),
+                    "server_default_tools_approval": server_default_tools_approval_json(cfg),
+                    "tools": tool_approval_overrides_json(cfg),
                     "auth_status": auth_status,
                 })
             })
@@ -848,6 +856,9 @@ async fn run_get(config_overrides: &CliConfigOverrides, get_args: GetArgs) -> Re
                 .tool_timeout_sec
                 .map(|timeout| timeout.as_secs_f64()),
             "default_tools_approval_mode": server.default_tools_approval_mode,
+            "default_tools_approval_mode_source": server_default_tools_approval_source(server),
+            "server_default_tools_approval": server_default_tools_approval_json(server),
+            "tools": tool_approval_overrides_json(server),
         }))?;
         println!("{output}");
         return Ok(());
@@ -959,6 +970,58 @@ async fn run_get(config_overrides: &CliConfigOverrides, get_args: GetArgs) -> Re
     println!("  remove: codex mcp remove {}", get_args.name);
 
     Ok(())
+}
+
+fn approval_mode_name(approval_mode: AppToolApproval) -> &'static str {
+    match approval_mode {
+        AppToolApproval::Auto => "auto",
+        AppToolApproval::Prompt => "prompt",
+        AppToolApproval::Approve => "approve",
+    }
+}
+
+fn server_default_tools_approval_source(server: &McpServerConfig) -> &'static str {
+    if server.default_tools_approval_mode.is_some() {
+        "explicit"
+    } else {
+        "inherited"
+    }
+}
+
+fn server_default_tools_approval_json(server: &McpServerConfig) -> serde_json::Value {
+    let mode = server.default_tools_approval_mode.unwrap_or_default();
+    serde_json::json!({
+        "mode": approval_mode_name(mode),
+        "source": server_default_tools_approval_source(server),
+    })
+}
+
+fn tool_approval_overrides_json(server: &McpServerConfig) -> serde_json::Value {
+    let mut tools = serde_json::Map::new();
+    let mut tool_entries: Vec<_> = server.tools.iter().collect();
+    tool_entries.sort_by_key(|(name, _)| *name);
+    for (name, tool) in tool_entries {
+        let effective = tool
+            .approval_mode
+            .or(server.default_tools_approval_mode)
+            .unwrap_or_default();
+        let source = if tool.approval_mode.is_some() {
+            "explicit"
+        } else if server.default_tools_approval_mode.is_some() {
+            "server_default"
+        } else {
+            "inherited"
+        };
+        tools.insert(
+            name.clone(),
+            serde_json::json!({
+                "approval_mode": tool.approval_mode.map(approval_mode_name),
+                "approval_mode_source": source,
+                "effective_approval_mode": approval_mode_name(effective),
+            }),
+        );
+    }
+    serde_json::Value::Object(tools)
 }
 
 fn parse_env_pair(raw: &str) -> Result<(String, String), String> {
